@@ -187,9 +187,9 @@ app.post("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">
-    Thanks for calling. This is your AI receptionist demo. The webhook is working correctly.
-  </Say>
+  <Connect>
+    <Stream url="wss://api.retellai.com/audio-stream" />
+  </Connect>
 </Response>`);
 });
 
