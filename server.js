@@ -187,14 +187,16 @@ app.post("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Connect>
-    <Stream url="wss://api.retellai.com/audio-stream" />
-  </Connect>
+  <Say voice="Polly.Joanna">
+    Thanks for calling. This is your AI receptionist demo. The webhook is working correctly.
+  </Say>
 </Response>`);
 });
 
 // ====== SERVER START ======
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
   console.log(`Server running on port ${port}`);
 });
