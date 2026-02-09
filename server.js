@@ -8,7 +8,7 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "1mb" }));
 
-// Optional: request logger (helps debugging)
+// Helpful request logger (so you can see hits in Render logs)
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
@@ -81,7 +81,10 @@ function buildCandidateSlots(nowLocal) {
 
     while (cursor.plus({ minutes: duration }) <= end) {
       if (cursor >= earliest) {
-        slots.push({ start: cursor, end: cursor.plus({ minutes: duration }) });
+        slots.push({
+          start: cursor,
+          end: cursor.plus({ minutes: duration })
+        });
       }
       cursor = cursor.plus({ minutes: step });
     }
@@ -95,20 +98,31 @@ function slotIsFree(slot, busyIntervals) {
   return !busyIntervals.some(b => slotInterval.overlaps(b));
 }
 
-// ====== MAIN BOOKING WEBHOOK (Retell calls this) ======
+// ====== BOOK DEMO (Retell calls this) ======
 app.post("/retell/book_demo", async (req, res) => {
   try {
-    const { full_name, email, phone = "", business_type = "", notes = "" } = req.body;
+    const {
+      full_name,
+      email,
+      phone = "",
+      business_type = "",
+      notes = ""
+    } = req.body || {};
 
     if (!full_name || !email) {
-      return res.status(400).json({ status: "error", message: "Missing name or email" });
+      return res.status(400).json({
+        status: "error",
+        message: "Missing full_name or email"
+      });
     }
 
     const { calendar, sheets } = getGoogleClients();
     const nowLocal = DateTime.now().setZone(DEFAULT_TIMEZONE);
 
     const candidates = buildCandidateSlots(nowLocal);
-    if (!candidates.length) return res.json({ status: "no_slots" });
+    if (!candidates.length) {
+      return res.json({ status: "no_slots" });
+    }
 
     const fb = await calendar.freebusy.query({
       requestBody: {
@@ -118,12 +132,17 @@ app.post("/retell/book_demo", async (req, res) => {
       }
     });
 
-    const busy = (fb.data.calendars[GCAL_ID]?.busy || []).map(b =>
-      Interval.fromDateTimes(DateTime.fromISO(b.start), DateTime.fromISO(b.end))
+    const busy = (fb.data.calendars?.[GCAL_ID]?.busy || []).map(b =>
+      Interval.fromDateTimes(
+        DateTime.fromISO(b.start),
+        DateTime.fromISO(b.end)
+      )
     );
 
     const slot = candidates.find(s => slotIsFree(s, busy));
-    if (!slot) return res.json({ status: "no_slots" });
+    if (!slot) {
+      return res.json({ status: "no_slots" });
+    }
 
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
@@ -144,8 +163,8 @@ app.post("/retell/book_demo", async (req, res) => {
     });
 
     const meetLink =
-      event.data.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri ||
-      event.data.hangoutLink ||
+      event.data?.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri ||
+      event.data?.hangoutLink ||
       "";
 
     await sheets.spreadsheets.values.append({
@@ -172,23 +191,27 @@ app.post("/retell/book_demo", async (req, res) => {
       end_time: slot.end.toISO(),
       meeting_link: meetLink
     });
+
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ status: "error", message: err.message });
+    console.error("BOOK_DEMO_ERROR:", err);
+    return res.status(500).json({
+      status: "error",
+      message: err?.message || "Unknown error"
+    });
   }
 });
 
-// ====== TWILIO VOICE WEBHOOK (Known-good test) ======
+// ====== TWILIO VOICE WEBHOOK (KNOWN-GOOD TEST) ======
 app.post("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna">
-    Thanks for calling. This is the MK Receptions demo line. If you can hear this, the webhook is working.
-  </Say>
+  <Say voice="Polly.Joanna">Thanks for calling. This is the MK Receptions demo line. If you can hear this, the webhook is working.</Say>
 </Response>`);
 });
 
 // ====== SERVER START ======
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(\`Server running on port \${port}\`));
+app.listen(port, () => {
+  console.log("Server running on port " + port);
+});
