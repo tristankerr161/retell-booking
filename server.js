@@ -4,9 +4,15 @@ import { DateTime, Interval } from "luxon";
 
 const app = express();
 
-// IMPORTANT: Twilio sends form-encoded data, not JSON
+// Twilio sends form-encoded data; Retell sends JSON
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "1mb" }));
+
+// Optional: request logger (helps debugging)
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path}`);
+  next();
+});
 
 // ====== CONFIG (from environment variables) ======
 const {
@@ -75,10 +81,7 @@ function buildCandidateSlots(nowLocal) {
 
     while (cursor.plus({ minutes: duration }) <= end) {
       if (cursor >= earliest) {
-        slots.push({
-          start: cursor,
-          end: cursor.plus({ minutes: duration })
-        });
+        slots.push({ start: cursor, end: cursor.plus({ minutes: duration }) });
       }
       cursor = cursor.plus({ minutes: step });
     }
@@ -92,7 +95,7 @@ function slotIsFree(slot, busyIntervals) {
   return !busyIntervals.some(b => slotInterval.overlaps(b));
 }
 
-// ====== BOOK DEMO API (used by Retell / webhook) ======
+// ====== MAIN BOOKING WEBHOOK (Retell calls this) ======
 app.post("/retell/book_demo", async (req, res) => {
   try {
     const { full_name, email, phone = "", business_type = "", notes = "" } = req.body;
@@ -105,9 +108,7 @@ app.post("/retell/book_demo", async (req, res) => {
     const nowLocal = DateTime.now().setZone(DEFAULT_TIMEZONE);
 
     const candidates = buildCandidateSlots(nowLocal);
-    if (!candidates.length) {
-      return res.json({ status: "no_slots" });
-    }
+    if (!candidates.length) return res.json({ status: "no_slots" });
 
     const fb = await calendar.freebusy.query({
       requestBody: {
@@ -118,16 +119,11 @@ app.post("/retell/book_demo", async (req, res) => {
     });
 
     const busy = (fb.data.calendars[GCAL_ID]?.busy || []).map(b =>
-      Interval.fromDateTimes(
-        DateTime.fromISO(b.start),
-        DateTime.fromISO(b.end)
-      )
+      Interval.fromDateTimes(DateTime.fromISO(b.start), DateTime.fromISO(b.end))
     );
 
     const slot = candidates.find(s => slotIsFree(s, busy));
-    if (!slot) {
-      return res.json({ status: "no_slots" });
-    }
+    if (!slot) return res.json({ status: "no_slots" });
 
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
@@ -149,7 +145,8 @@ app.post("/retell/book_demo", async (req, res) => {
 
     const meetLink =
       event.data.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri ||
-      event.data.hangoutLink;
+      event.data.hangoutLink ||
+      "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
@@ -169,34 +166,29 @@ app.post("/retell/book_demo", async (req, res) => {
       }
     });
 
-    res.json({
+    return res.json({
       status: "confirmed",
       start_time: slot.start.toISO(),
       end_time: slot.end.toISO(),
       meeting_link: meetLink
     });
-
   } catch (err) {
     console.error(err);
-    res.status(500).json({ status: "error", message: err.message });
+    return res.status(500).json({ status: "error", message: err.message });
   }
 });
 
-// ====== TWILIO VOICE WEBHOOK ======
+// ====== TWILIO VOICE WEBHOOK (Known-good test) ======
 app.post("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="Polly.Joanna">
-    Thanks for calling. This is your AI receptionist demo. The webhook is working correctly.
+    Thanks for calling. This is the MK Receptions demo line. If you can hear this, the webhook is working.
   </Say>
 </Response>`);
 });
 
 // ====== SERVER START ======
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
-  console.log(`Server running on port ${port}`);
-});
+app.listen(port, () => console.log(\`Server running on port \${port}\`));
