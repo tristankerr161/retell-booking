@@ -219,12 +219,18 @@ app.post("/retell/book_demo", async (req, res) => {
 // =====================
 // TWILIO → RETELL STREAM
 // =====================
+// ====== TWILIO VOICE WEBHOOK ======
 app.post("/twilio/voice", (req, res) => {
-  res.set("Content-Type", "text/xml");
-  res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?>
+  res.type("text/xml");
+
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://api.retellai.com/audio-stream" />
+    <Stream 
+      url="wss://api.retellai.com/audio-stream"
+    >
+      <Parameter name="agent_id" value="${process.env.RETELL_AGENT_ID}" />
+    </Stream>
   </Connect>
 </Response>`);
 });
