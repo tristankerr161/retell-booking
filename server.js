@@ -3,6 +3,9 @@ import { google } from "googleapis";
 import { DateTime, Interval } from "luxon";
 
 const app = express();
+
+// IMPORTANT: Twilio sends form-encoded data, not JSON
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "1mb" }));
 
 // ====== CONFIG (from environment variables) ======
@@ -89,7 +92,7 @@ function slotIsFree(slot, busyIntervals) {
   return !busyIntervals.some(b => slotInterval.overlaps(b));
 }
 
-// ====== MAIN WEBHOOK ======
+// ====== BOOK DEMO API (used by Retell / webhook) ======
 app.post("/retell/book_demo", async (req, res) => {
   try {
     const { full_name, email, phone = "", business_type = "", notes = "" } = req.body;
@@ -179,5 +182,19 @@ app.post("/retell/book_demo", async (req, res) => {
   }
 });
 
+// ====== TWILIO VOICE WEBHOOK ======
+app.post("/twilio/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">
+    Thanks for calling. This is your AI receptionist demo. The webhook is working correctly.
+  </Say>
+</Response>`);
+});
+
+// ====== SERVER START ======
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
