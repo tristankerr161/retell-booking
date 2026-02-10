@@ -1,120 +1,4 @@
 // =====================
-// BOOK DEMO (COPY/PASTE ROUTE ONLY)
-// =====================
-app.post("/retell/book_demo", async (req, res) => {
-  try {
-    const payload = extractArgs(req);
-
-    const {
-      full_name,
-      email,
-      phone,
-      business_type,
-      notes = "",
-      start_time
-    } = payload;
-
-    const missing = [];
-    if (!full_name) missing.push("full_name");
-    if (!email) missing.push("email");
-    if (!phone) missing.push("phone");
-    if (!business_type) missing.push("business_type");
-    if (!start_time) missing.push("start_time");
-
-    if (missing.length) {
-      return res.status(400).json({
-        status: "error",
-        message: "Missing required fields",
-        missing
-      });
-    }
-
-    const { calendar, sheets } = getGoogleClients();
-
-    // Validate time (blocks wrong year like 2024, out-of-window, weekends, etc.)
-    const validation = validateRequestedStart(start_time);
-    if (!validation.ok) {
-      const alternatives = await getNextAvailableSlots(calendar, 2);
-      return res.json({
-        status: "invalid_time",
-        message: validation.message,
-        alternatives
-      });
-    }
-
-    const start = validation.start;
-    const end = start.plus({ minutes: Number(DEMO_DURATION_MINUTES) });
-
-    // Check busy for requested slot
-    const busy = await getBusyIntervals(calendar, start.toUTC().toISO(), end.toUTC().toISO());
-    if (!slotIsFree({ start, end }, busy)) {
-      const nearby = await findNearbyFreeSlots(calendar, start, 2);
-      return res.json({
-        status: "unavailable",
-        message: "That time is taken.",
-        requested: {
-          start_time: start.toISO(),
-          end_time: end.toISO(),
-          label: formatSlotLabel(start, end)
-        },
-        alternatives: nearby
-      });
-    }
-
-    // Create event (NO attendees / NO meet link)
-    const event = await calendar.events.insert({
-      calendarId: GCAL_ID,
-      sendUpdates: "none",
-      requestBody: {
-        summary: `MK Receptions Demo – ${full_name}`,
-        description:
-          `Name: ${full_name}\n` +
-          `Email: ${email}\n` +
-          `Phone: ${phone}\n` +
-          `Business: ${business_type}\n` +
-          (notes ? `Notes: ${notes}\n` : ""),
-        start: { dateTime: start.toISO(), timeZone: DEFAULT_TIMEZONE },
-        end: { dateTime: end.toISO(), timeZone: DEFAULT_TIMEZONE }
-      }
-    });
-
-    const calendarLink = event.data.htmlLink || "";
-    const eventId = event.data.id || "";
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_TAB}!A:Z`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          new Date().toISOString(),
-          full_name,
-          email,
-          phone,
-          business_type,
-          start.toISO(),
-          end.toISO(),
-          calendarLink,
-          eventId
-        ]]
-      }
-    });
-
-    return res.json({
-      status: "confirmed",
-      start_time: start.toISO(),
-      end_time: end.toISO(),
-      calendar_link: calendarLink
-    });
-  } catch (err) {
-    console.error("BOOK_DEMO ERROR:", err);
-    return res.status(500).json({
-      status: "error",
-      message: err?.message || "Internal server error"
-    });
-  }
-});
-// =====================
 // FULL server.js (COPY/PASTE ENTIRE FILE)
 // =====================
 import express from "express";
@@ -134,27 +18,31 @@ app.use(express.json({ limit: "2mb" }));
 // ENV CONFIG
 // =====================
 const {
+  // Google creds (recommended)
   GOOGLE_CLIENT_EMAIL,
   GOOGLE_PRIVATE_KEY,
+  // or fallback JSON
   GOOGLE_SERVICE_ACCOUNT_JSON,
 
+  // Calendar + Sheets
   GCAL_ID = "primary",
   SHEET_ID,
   SHEET_TAB = "Bookings",
 
+  // Timezone
   DEFAULT_TIMEZONE = "America/New_York",
 
+  // Scheduling
   MIN_LEAD_MINUTES = "120",
   DEMO_DURATION_MINUTES = "30",
   SLOT_GRANULARITY_MINUTES = "30",
   SEARCH_DAYS = "14",
 
-  // Set these on Render to enforce your window:
-  // WORK_START_HOUR=12
-  // WORK_END_HOUR=21
+  // Window: 12pm–9pm ET
   WORK_START_HOUR = "12",
   WORK_END_HOUR = "21",
 
+  // Twilio → Retell streaming
   RETELL_AGENT_ID
 } = process.env;
 
@@ -277,21 +165,17 @@ function buildCandidateSlots(nowLocal) {
   return slots;
 }
 
-// HARD VALIDATION to stop “2024” or any past booking instantly
+// HARD VALIDATION: blocks wrong year (e.g., 2024), past bookings, weekends, outside window
 function validateRequestedStart(startTimeISO) {
-  if (!startTimeISO) {
-    return { ok: false, message: "Missing start_time." };
-  }
+  if (!startTimeISO) return { ok: false, message: "Missing start_time." };
 
   const start = DateTime.fromISO(startTimeISO, { setZone: true }).setZone(DEFAULT_TIMEZONE);
-  if (!start.isValid) {
-    return { ok: false, message: "Invalid start_time format. Use ISO 8601 in ET." };
-  }
+  if (!start.isValid) return { ok: false, message: "Invalid start_time format. Use ISO 8601 in ET." };
 
   const now = DateTime.now().setZone(DEFAULT_TIMEZONE);
   const lead = Number(MIN_LEAD_MINUTES);
 
-  // Block past / too-soon (fixes wrong year like 2024 automatically)
+  // Blocks past or too-soon (also catches incorrect years like 2024)
   if (start < now.plus({ minutes: lead })) {
     return { ok: false, message: "That time is in the past or too soon. Please choose a future time." };
   }
@@ -301,7 +185,7 @@ function validateRequestedStart(startTimeISO) {
     return { ok: false, message: "Demos are Monday through Friday only." };
   }
 
-  // Window enforcement (12pm–9pm ET)
+  // 12pm–9pm ET window
   const startHour = Number(WORK_START_HOUR);
   const endHour = Number(WORK_END_HOUR);
   const end = start.plus({ minutes: Number(DEMO_DURATION_MINUTES) });
@@ -313,7 +197,7 @@ function validateRequestedStart(startTimeISO) {
     return { ok: false, message: `Demos can only be booked between ${startHour}:00 and ${endHour}:00 ET.` };
   }
 
-  // Optional: enforce granularity (30-min steps)
+  // Enforce 30-min boundaries
   const step = Number(SLOT_GRANULARITY_MINUTES);
   if (start.minute % step !== 0) {
     return { ok: false, message: `Please choose a time on a ${step}-minute boundary (e.g., 12:00, 12:30, 1:00).` };
@@ -376,10 +260,7 @@ async function findNearbyFreeSlots(calendar, preferredStartLocal, count = 2) {
   );
 
   const sorted = candidates
-    .map(s => ({
-      ...s,
-      distMs: Math.abs(s.start.toMillis() - preferredStartLocal.toMillis())
-    }))
+    .map(s => ({ ...s, distMs: Math.abs(s.start.toMillis() - preferredStartLocal.toMillis()) }))
     .sort((a, b) => a.distMs - b.distMs);
 
   const out = [];
@@ -415,10 +296,7 @@ app.post("/retell/get_slots", async (req, res) => {
     const { calendar } = getGoogleClients();
     const slots = await getNextAvailableSlots(calendar, count);
 
-    return res.json({
-      status: slots.length ? "ok" : "no_slots",
-      slots
-    });
+    return res.json({ status: slots.length ? "ok" : "no_slots", slots });
   } catch (err) {
     console.error("GET_SLOTS ERROR:", err);
     return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
@@ -487,10 +365,7 @@ app.post("/retell/get_nearby_slots", async (req, res) => {
     const preferred = validation.start;
     const slots = await findNearbyFreeSlots(calendar, preferred, count);
 
-    return res.json({
-      status: slots.length ? "ok" : "no_slots",
-      slots
-    });
+    return res.json({ status: slots.length ? "ok" : "no_slots", slots });
   } catch (err) {
     console.error("GET_NEARBY_SLOTS ERROR:", err);
     return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
@@ -521,11 +396,7 @@ app.post("/retell/book_demo", async (req, res) => {
     if (!start_time) missing.push("start_time");
 
     if (missing.length) {
-      return res.status(400).json({
-        status: "error",
-        message: "Missing required fields",
-        missing
-      });
+      return res.status(400).json({ status: "error", message: "Missing required fields", missing });
     }
 
     const { calendar, sheets } = getGoogleClients();
@@ -533,11 +404,7 @@ app.post("/retell/book_demo", async (req, res) => {
     const validation = validateRequestedStart(start_time);
     if (!validation.ok) {
       const alternatives = await getNextAvailableSlots(calendar, 2);
-      return res.json({
-        status: "invalid_time",
-        message: validation.message,
-        alternatives
-      });
+      return res.json({ status: "invalid_time", message: validation.message, alternatives });
     }
 
     const start = validation.start;
@@ -549,15 +416,12 @@ app.post("/retell/book_demo", async (req, res) => {
       return res.json({
         status: "unavailable",
         message: "That time is taken.",
-        requested: {
-          start_time: start.toISO(),
-          end_time: end.toISO(),
-          label: formatSlotLabel(start, end)
-        },
+        requested: { start_time: start.toISO(), end_time: end.toISO(), label: formatSlotLabel(start, end) },
         alternatives: nearby
       });
     }
 
+    // Create event (NO attendees / NO Meet link)
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
       sendUpdates: "none",
@@ -604,10 +468,7 @@ app.post("/retell/book_demo", async (req, res) => {
     });
   } catch (err) {
     console.error("BOOK_DEMO ERROR:", err);
-    return res.status(500).json({
-      status: "error",
-      message: err?.message || "Internal server error"
-    });
+    return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
   }
 });
 
@@ -630,7 +491,6 @@ app.post("/twilio/voice", (req, res) => {
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
 });
 
-// Helpful for browser testing
 app.get("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
@@ -641,3 +501,4 @@ app.get("/twilio/voice", (req, res) => {
 // =====================
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
+port}`));
