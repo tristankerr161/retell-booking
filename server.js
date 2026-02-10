@@ -77,19 +77,15 @@ function getGoogleCreds() {
 }
 
 function getGoogleClients() {
-  const creds = getGoogleCreds();
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
 
-  // Quick sanity check (does NOT print the key)
-  if (!creds.private_key.includes("BEGIN PRIVATE KEY")) {
-    throw new Error(
-      "GOOGLE_PRIVATE_KEY does not look like a PEM. It must include '-----BEGIN PRIVATE KEY-----' and the full key body."
-    );
-  }
+  const key = JSON.parse(raw);
 
   const auth = new google.auth.JWT(
-    creds.client_email,
+    key.client_email,
     undefined,
-    creds.private_key,
+    key.private_key.replace(/\\n/g, "\n"),
     [
       "https://www.googleapis.com/auth/calendar",
       "https://www.googleapis.com/auth/spreadsheets"
