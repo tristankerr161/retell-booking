@@ -6,7 +6,7 @@ const app = express();
 
 /**
  * Twilio sends application/x-www-form-urlencoded
- * Retell function calls send JSON (usually)
+ * Retell function calls send JSON
  */
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
@@ -39,10 +39,13 @@ if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 function getGoogleClients() {
   const key = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
 
+  // ✅ Fix: env vars often store "\n" literally; Google needs real newlines
+  const fixedPrivateKey = (key.private_key || "").replace(/\\n/g, "\n");
+
   const auth = new google.auth.JWT(
     key.client_email,
     undefined,
-    key.private_key,
+    fixedPrivateKey,
     [
       "https://www.googleapis.com/auth/calendar",
       "https://www.googleapis.com/auth/spreadsheets"
@@ -97,7 +100,7 @@ function slotIsFree(slot, busyIntervals) {
 }
 
 // =====================
-// HEALTH CHECK
+// HEALTH CHECKS
 // =====================
 app.get("/", (req, res) => res.json({ ok: true }));
 app.get("/health", (req, res) => res.json({ ok: true }));
@@ -107,12 +110,11 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // =====================
 app.post("/retell/book_demo", async (req, res) => {
   try {
-    // ✅ Support BOTH payload styles:
+    // ✅ Support BOTH payload shapes:
     // - args-only: { full_name, email, phone, ... }
     // - wrapped:   { args: { full_name, email, phone, ... }, ... }
     const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
 
-    // Helpful log for debugging
     console.log("BOOK_DEMO raw body:", JSON.stringify(req.body));
     console.log("BOOK_DEMO payload:", JSON.stringify(payload));
 
@@ -220,7 +222,7 @@ app.post("/retell/book_demo", async (req, res) => {
 });
 
 // =====================
-// TWILIO → RETELL STREAM
+// TWILIO → RETELL STREAM (optional, safe to keep)
 // =====================
 function twimlStreamResponse(agentId) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -238,7 +240,7 @@ app.post("/twilio/voice", (req, res) => {
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
 });
 
-// Nice-to-have: lets you visit in browser without "Cannot GET"
+// Helpful for browser testing (GET)
 app.get("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
