@@ -15,13 +15,16 @@ app.use(express.json({ limit: "2mb" }));
 // ENV CONFIG
 // =====================
 const {
+  // NEW (recommended)
   GOOGLE_CLIENT_EMAIL,
   GOOGLE_PRIVATE_KEY,
 
-  GCAL_ID, // DO NOT default to "primary" when using service accounts
+  // OLD (optional fallback)
+  GOOGLE_SERVICE_ACCOUNT_JSON,
+
+  GCAL_ID = "primary",
   SHEET_ID,
   SHEET_TAB = "Bookings",
-
   DEFAULT_TIMEZONE = "America/Detroit",
   MIN_LEAD_MINUTES = "120",
   DEMO_DURATION_MINUTES = "30",
@@ -29,27 +32,64 @@ const {
   SEARCH_DAYS = "14",
   WORK_START_HOUR = "9",
   WORK_END_HOUR = "17",
-
   RETELL_AGENT_ID
 } = process.env;
 
-if (!GOOGLE_CLIENT_EMAIL) throw new Error("Missing GOOGLE_CLIENT_EMAIL");
-if (!GOOGLE_PRIVATE_KEY) throw new Error("Missing GOOGLE_PRIVATE_KEY");
-if (!GCAL_ID) throw new Error("Missing GCAL_ID (use your calendar ID, not 'primary')");
 if (!SHEET_ID) throw new Error("Missing SHEET_ID");
 if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 
 // =====================
 // GOOGLE CLIENTS
 // =====================
+function normalizePrivateKey(raw) {
+  if (!raw) return "";
+
+  // If you paste as one line with \n sequences, convert them to real newlines.
+  let k = raw.replace(/\\n/g, "\n");
+
+  // Normalize Windows line endings
+  k = k.replace(/\r\n/g, "\n").trim();
+
+  return k;
+}
+
+function getGoogleCreds() {
+  // Prefer GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY
+  if (GOOGLE_CLIENT_EMAIL && GOOGLE_PRIVATE_KEY) {
+    return {
+      client_email: GOOGLE_CLIENT_EMAIL.trim(),
+      private_key: normalizePrivateKey(GOOGLE_PRIVATE_KEY)
+    };
+  }
+
+  // Fallback to GOOGLE_SERVICE_ACCOUNT_JSON if present
+  if (GOOGLE_SERVICE_ACCOUNT_JSON) {
+    const parsed = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
+    return {
+      client_email: (parsed.client_email || "").trim(),
+      private_key: normalizePrivateKey(parsed.private_key || "")
+    };
+  }
+
+  throw new Error(
+    "Missing Google credentials. Provide GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY (recommended) OR GOOGLE_SERVICE_ACCOUNT_JSON."
+  );
+}
+
 function getGoogleClients() {
-  // ✅ Render often stores \n literally; convert to real newlines
-  const fixedPrivateKey = GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n");
+  const creds = getGoogleCreds();
+
+  // Quick sanity check (does NOT print the key)
+  if (!creds.private_key.includes("BEGIN PRIVATE KEY")) {
+    throw new Error(
+      "GOOGLE_PRIVATE_KEY does not look like a PEM. It must include '-----BEGIN PRIVATE KEY-----' and the full key body."
+    );
+  }
 
   const auth = new google.auth.JWT(
-    GOOGLE_CLIENT_EMAIL,
+    creds.client_email,
     undefined,
-    fixedPrivateKey,
+    creds.private_key,
     [
       "https://www.googleapis.com/auth/calendar",
       "https://www.googleapis.com/auth/spreadsheets"
@@ -114,21 +154,21 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // =====================
 app.post("/retell/book_demo", async (req, res) => {
   try {
-    // Supports both payload shapes:
-    // - args-only: { full_name, email, phone, ... }
-    // - wrapped:   { args: { full_name, email, phone, ... } }
+    // Retell may send args-only OR wrapped in args/arguments
     const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
 
-    console.log("BOOK_DEMO raw body:", JSON.stringify(req.body));
-    console.log("BOOK_DEMO payload:", JSON.stringify(payload));
-
-    const { full_name, email, phone, business_type = "", notes = "" } = payload;
+    const {
+      full_name,
+      email,
+      phone,
+      business_type = "",
+      notes = ""
+    } = payload;
 
     const missing = [];
     if (!full_name) missing.push("full_name");
     if (!email) missing.push("email");
     if (!phone) missing.push("phone");
-
     if (missing.length) {
       return res.status(400).json({
         status: "error",
@@ -143,7 +183,6 @@ app.post("/retell/book_demo", async (req, res) => {
     const candidates = buildCandidateSlots(nowLocal);
     if (!candidates.length) return res.json({ status: "no_slots" });
 
-    // Free/busy check
     const fb = await calendar.freebusy.query({
       requestBody: {
         timeMin: candidates[0].start.toUTC().toISO(),
@@ -159,7 +198,6 @@ app.post("/retell/book_demo", async (req, res) => {
     const slot = candidates.find(s => slotIsFree(s, busy));
     if (!slot) return res.json({ status: "no_slots" });
 
-    // Create calendar event + Meet link
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
       conferenceDataVersion: 1,
@@ -187,7 +225,6 @@ app.post("/retell/book_demo", async (req, res) => {
       event.data.hangoutLink ||
       "";
 
-    // Append to sheet
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${SHEET_TAB}!A:Z`,
@@ -212,7 +249,6 @@ app.post("/retell/book_demo", async (req, res) => {
       end_time: slot.end.toISO(),
       meeting_link: meetLink
     });
-
   } catch (err) {
     console.error("BOOK DEMO ERROR:", err);
     return res.status(500).json({
@@ -241,7 +277,6 @@ app.post("/twilio/voice", (req, res) => {
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
 });
 
-// Optional GET for browser testing
 app.get("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
