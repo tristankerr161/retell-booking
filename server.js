@@ -15,10 +15,13 @@ app.use(express.json({ limit: "2mb" }));
 // ENV CONFIG
 // =====================
 const {
-  GOOGLE_SERVICE_ACCOUNT_JSON,
-  GCAL_ID = "primary",
+  GOOGLE_CLIENT_EMAIL,
+  GOOGLE_PRIVATE_KEY,
+
+  GCAL_ID, // DO NOT default to "primary" when using service accounts
   SHEET_ID,
   SHEET_TAB = "Bookings",
+
   DEFAULT_TIMEZONE = "America/Detroit",
   MIN_LEAD_MINUTES = "120",
   DEMO_DURATION_MINUTES = "30",
@@ -26,10 +29,13 @@ const {
   SEARCH_DAYS = "14",
   WORK_START_HOUR = "9",
   WORK_END_HOUR = "17",
+
   RETELL_AGENT_ID
 } = process.env;
 
-if (!GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
+if (!GOOGLE_CLIENT_EMAIL) throw new Error("Missing GOOGLE_CLIENT_EMAIL");
+if (!GOOGLE_PRIVATE_KEY) throw new Error("Missing GOOGLE_PRIVATE_KEY");
+if (!GCAL_ID) throw new Error("Missing GCAL_ID (use your calendar ID, not 'primary')");
 if (!SHEET_ID) throw new Error("Missing SHEET_ID");
 if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 
@@ -37,13 +43,11 @@ if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 // GOOGLE CLIENTS
 // =====================
 function getGoogleClients() {
-  const key = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
-
-  // ✅ Fix: env vars often store "\n" literally; Google needs real newlines
-  const fixedPrivateKey = (key.private_key || "").replace(/\\n/g, "\n");
+  // ✅ Render often stores \n literally; convert to real newlines
+  const fixedPrivateKey = GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n");
 
   const auth = new google.auth.JWT(
-    key.client_email,
+    GOOGLE_CLIENT_EMAIL,
     undefined,
     fixedPrivateKey,
     [
@@ -110,21 +114,15 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // =====================
 app.post("/retell/book_demo", async (req, res) => {
   try {
-    // ✅ Support BOTH payload shapes:
+    // Supports both payload shapes:
     // - args-only: { full_name, email, phone, ... }
-    // - wrapped:   { args: { full_name, email, phone, ... }, ... }
+    // - wrapped:   { args: { full_name, email, phone, ... } }
     const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
 
     console.log("BOOK_DEMO raw body:", JSON.stringify(req.body));
     console.log("BOOK_DEMO payload:", JSON.stringify(payload));
 
-    const {
-      full_name,
-      email,
-      phone,
-      business_type = "",
-      notes = ""
-    } = payload;
+    const { full_name, email, phone, business_type = "", notes = "" } = payload;
 
     const missing = [];
     if (!full_name) missing.push("full_name");
@@ -145,6 +143,7 @@ app.post("/retell/book_demo", async (req, res) => {
     const candidates = buildCandidateSlots(nowLocal);
     if (!candidates.length) return res.json({ status: "no_slots" });
 
+    // Free/busy check
     const fb = await calendar.freebusy.query({
       requestBody: {
         timeMin: candidates[0].start.toUTC().toISO(),
@@ -160,6 +159,7 @@ app.post("/retell/book_demo", async (req, res) => {
     const slot = candidates.find(s => slotIsFree(s, busy));
     if (!slot) return res.json({ status: "no_slots" });
 
+    // Create calendar event + Meet link
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
       conferenceDataVersion: 1,
@@ -187,6 +187,7 @@ app.post("/retell/book_demo", async (req, res) => {
       event.data.hangoutLink ||
       "";
 
+    // Append to sheet
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${SHEET_TAB}!A:Z`,
@@ -222,7 +223,7 @@ app.post("/retell/book_demo", async (req, res) => {
 });
 
 // =====================
-// TWILIO → RETELL STREAM (optional, safe to keep)
+// TWILIO → RETELL STREAM
 // =====================
 function twimlStreamResponse(agentId) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -240,7 +241,7 @@ app.post("/twilio/voice", (req, res) => {
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
 });
 
-// Helpful for browser testing (GET)
+// Optional GET for browser testing
 app.get("/twilio/voice", (req, res) => {
   res.type("text/xml");
   res.send(twimlStreamResponse(RETELL_AGENT_ID));
