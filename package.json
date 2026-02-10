@@ -1,13 +1,14 @@
 {
-  "type": "service_account",
-  "project_id": "mk-receptions",
-  "private_key_id": "6506f1ac7dc77126612d0f4d1649dd83fb576680",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCsgqB9G3JOjX5q\nf3xq5yy4eAujcNgdy5gE81R8apUkVVKegz7RY2QxMKBOW//Ro6zOreMxgwgCZtdJ\ncoo/c7XjK9LbEPtVJAC5SgWJYgmuRGqFTvQjrsBAVta6qAwQ9sy6FVfjrJ3NSln5\n+LQRbMx8phiRb9ZSkTqa6oqAdIWLVVtsoWAaqbGfa/pwJ3iWvIEP9uViN2ACg1mm\nHjjCy2KNvIMC87ZgA777NeYWUOgkCizrFd7/YUHMoZH1Fx5N8fwUZ/ACBovQRJP7\nz0mvFwfE7qa/s7wr4+LHf/wvLOGcidHRvodgLD+zAD2m+H00khVtZFYXw4GDzhSw\nCuIP6UKNAgMBAAECggEAS2FE+YXtu89uJuEQH7JmQzEJfOCJPvPAuKEPENKN2vOB\nh4w3/czdcfUah0MCFLvdfe5TsUXdURdZCVoIeNN57gsvNtRDzp9NxalHpBF3w3NX\nzGqEmbb5gOOxLpzRsPP233UGE5FQ3uyXRnhbTqXo8KqvX5Wr5CZbomfMH3dLB2eL\nixNguOfVTOWbm5GiAETfYXlr8nhTz9ChqZ+Oqmhx29N04apCRSurrL8A9pTdCeQA\nSmupkp7e14aN8BkhPGCp8uvkfpOqxOlvkSCZrrKCDQbYpGqUbpWCitdWkEgouTga\nTKb9D7uC5LRSySM/VrH/JCRbcj3BEe8QYFbjN4YnbQKBgQDlqcc02TNxSAS8bVEf\nFG1ZU2pVA96SNwHcvSjUQ2zSVmJaz9z6bgIeuBiWUK+P+DFr6Epu11bPu6jrtfia\nkrXNmMabJ2OVsKIs4SQKAhYjUdBhfQcU/FcF+6q7sXrZh7jszLYhJNy6Pg3yVD7U\n6HO/EGhURjm0qNVkhsQeEmb4LwKBgQDASwKc7Xq8s3Q3xQ3r27I8EhxTMAv+SlXS\nvqDN+Y2i42zscmx9v9/PMNPCmCytuW4M90fygmo+8mB36pPwznJqHO096UBNW9uc\ndXvRSdPAD6rbF8EEwPy65QH2rlsDu7xPsBHC9FpS1KH8iQzYD79GvqTQp6n4e5qU\nVDpxJ0DGAwKBgDaq4zBBQ22DpxzzKIwtYJoSsQzrjt9fGKJipIViR1UKGv9i20cB\nSJ/nUnL1YdTzT1BQSud3esKX+O2iszqYEY6O/zePeLT5BqGINfvr4zklEGUkTbtB\nFbXm4g0rggKlu+8iC3h4PdJXUxqL0yj67BJe5XaqALJwPdtf+O7vknMhAoGAEn8k\noTO2urAIXdT2odlgK6cSUm4suSktWDg9/5IhralysMvQ48exH5zywaUhpxRPIbAn\nm4wv7B4kaWSHFoLFPq/JokrthINxfHtQjbEsTS00oh6G0o49wTyGE9RxrMpCMugc\nzUPz7EPH0SLduWrKW2O7Ntbp4p0BIYN4m6nK8UECgYEAzoEDY/r9ycdOovlyzqaH\n1+9oXc0bsbRpXk/Eyd2CdF7m3AGd3C+dMh9w1cTGFdsSTFD7Yq/ZzIykfsKYsyiw\nKdzWfuS8SWoBhD1unE58l7Egl7nFbxm7WjqafpyOTj7Iq5RdCNZKlhUBQCC85aJ+\nc37A88oubfwn+fujwUGlOqI=\n-----END PRIVATE KEY-----\n",
-  "client_email": "service-account@mk-receptions.iam.gserviceaccount.com",
-  "client_id": "112817215477910192573",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/service-account%40mk-receptions.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
+  "name": "retell-booking",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "googleapis": "^140.0.0",
+    "luxon": "^3.5.0"
+  }
 }
