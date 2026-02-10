@@ -6,7 +6,7 @@ const app = express();
 
 /**
  * Twilio sends application/x-www-form-urlencoded
- * Retell custom functions send JSON
+ * Retell function calls send JSON
  */
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
@@ -15,17 +15,18 @@ app.use(express.json({ limit: "2mb" }));
 // ENV CONFIG
 // =====================
 const {
+  // Recommended (Render env vars)
   GOOGLE_CLIENT_EMAIL,
   GOOGLE_PRIVATE_KEY,
 
-  // Optional fallback
+  // Optional fallback (full JSON blob)
   GOOGLE_SERVICE_ACCOUNT_JSON,
 
   GCAL_ID = "primary",
   SHEET_ID,
   SHEET_TAB = "Bookings",
 
-  // Use Eastern Time (ET)
+  // Use an ET zone, but never *say* "Detroit" in prompts.
   DEFAULT_TIMEZONE = "America/New_York",
 
   MIN_LEAD_MINUTES = "120",
@@ -46,12 +47,15 @@ if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 // =====================
 function normalizePrivateKey(raw) {
   if (!raw) return "";
-  // Convert "\n" sequences into real newlines + trim
-  return raw.replace(/\\n/g, "\n").replace(/\r\n/g, "\n").trim();
+  // Convert literal "\n" sequences into real newlines
+  let k = raw.replace(/\\n/g, "\n");
+  // Normalize Windows line endings just in case
+  k = k.replace(/\r\n/g, "\n").trim();
+  return k;
 }
 
 function getGoogleCreds() {
-  // Preferred: split env vars
+  // Prefer split env vars
   if (GOOGLE_CLIENT_EMAIL && GOOGLE_PRIVATE_KEY) {
     return {
       client_email: GOOGLE_CLIENT_EMAIL.trim(),
@@ -59,7 +63,7 @@ function getGoogleCreds() {
     };
   }
 
-  // Fallback: whole JSON in env
+  // Fallback to full JSON env var
   if (GOOGLE_SERVICE_ACCOUNT_JSON) {
     const parsed = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
     return {
@@ -75,9 +79,8 @@ function getGoogleCreds() {
 
 function getGoogleClients() {
   const { client_email, private_key } = getGoogleCreds();
-
-  if (!client_email) throw new Error("Missing Google client_email");
-  if (!private_key) throw new Error("Missing Google private_key");
+  if (!client_email) throw new Error("Missing client_email in Google creds");
+  if (!private_key) throw new Error("Missing private_key in Google creds");
 
   const auth = new google.auth.JWT(
     client_email,
@@ -102,13 +105,13 @@ function isWeekday(dt) {
   return dt.weekday >= 1 && dt.weekday <= 5;
 }
 
-function buildCandidateSlots(nowLocal, options = {}) {
-  const lead = Number(options.minLeadMinutes ?? MIN_LEAD_MINUTES);
-  const duration = Number(options.durationMinutes ?? DEMO_DURATION_MINUTES);
-  const step = Number(options.stepMinutes ?? SLOT_GRANULARITY_MINUTES);
-  const days = Number(options.searchDays ?? SEARCH_DAYS);
-  const startHour = Number(options.workStartHour ?? WORK_START_HOUR);
-  const endHour = Number(options.workEndHour ?? WORK_END_HOUR);
+function buildCandidateSlots(nowLocal) {
+  const lead = Number(MIN_LEAD_MINUTES);
+  const duration = Number(DEMO_DURATION_MINUTES);
+  const step = Number(SLOT_GRANULARITY_MINUTES);
+  const days = Number(SEARCH_DAYS);
+  const startHour = Number(WORK_START_HOUR);
+  const endHour = Number(WORK_END_HOUR);
 
   const earliest = nowLocal.plus({ minutes: lead });
   const slots = [];
@@ -152,13 +155,82 @@ async function getBusyIntervals(calendar, timeMinISO, timeMaxISO) {
   return busy;
 }
 
-function formatSlotForAgent(slot) {
-  // Human-friendly ET time for the agent to read
-  return {
-    start_time: slot.start.toISO(), // ISO in ET offset
-    end_time: slot.end.toISO(),
-    label: slot.start.toFormat("ccc, LLL d 'at' h:mm a") + " ET"
-  };
+function formatSlotLabel(dtStart, dtEnd) {
+  // Example: "Tue, Feb 11 at 2:00 PM–2:30 PM ET"
+  const day = dtStart.toFormat("ccc, LLL d");
+  const start = dtStart.toFormat("h:mm a");
+  const end = dtEnd.toFormat("h:mm a");
+  return `${day} at ${start}–${end} ET`;
+}
+
+function pickFirstNFreeSlots(candidates, busyIntervals, n = 2) {
+  const free = [];
+  for (const s of candidates) {
+    if (slotIsFree(s, busyIntervals)) {
+      free.push(s);
+      if (free.length >= n) break;
+    }
+  }
+  return free;
+}
+
+// Build a focused search window around a requested time, then return nearby free slots
+async function findNearbyFreeSlots(calendar, preferredStartLocal, count = 2) {
+  const duration = Number(DEMO_DURATION_MINUTES);
+  const step = Number(SLOT_GRANULARITY_MINUTES);
+  const startHour = Number(WORK_START_HOUR);
+  const endHour = Number(WORK_END_HOUR);
+
+  // Search same day first, then next weekday if needed (up to 5 days)
+  const daysToTry = 5;
+  const allCandidates = [];
+
+  for (let i = 0; i < daysToTry; i++) {
+    const day = preferredStartLocal.startOf("day").plus({ days: i });
+    if (!isWeekday(day)) continue;
+
+    let cursor = day.set({ hour: startHour, minute: 0, second: 0, millisecond: 0 });
+    const end = day.set({ hour: endHour, minute: 0, second: 0, millisecond: 0 });
+
+    while (cursor.plus({ minutes: duration }) <= end) {
+      allCandidates.push({ start: cursor, end: cursor.plus({ minutes: duration }) });
+      cursor = cursor.plus({ minutes: step });
+    }
+  }
+
+  // Busy window: cover whole candidate range
+  if (!allCandidates.length) return [];
+  const busy = await getBusyIntervals(
+    calendar,
+    allCandidates[0].start.toUTC().toISO(),
+    allCandidates[allCandidates.length - 1].end.toUTC().toISO()
+  );
+
+  // Sort candidates by distance from preferred time (absolute minutes), then pick first free
+  const sorted = allCandidates
+    .map((s) => ({
+      ...s,
+      dist: Math.abs(s.start.diff(preferredStartLocal, "minutes").minutes)
+    }))
+    .sort((a, b) => a.dist - b.dist)
+    .map(({ dist, ...slot }) => slot);
+
+  const free = [];
+  for (const s of sorted) {
+    if (slotIsFree(s, busy)) {
+      // Avoid returning the exact same slot twice
+      if (!free.some((x) => x.start.toISO() === s.start.toISO())) free.push(s);
+      if (free.length >= count) break;
+    }
+  }
+  return free;
+}
+
+// =====================
+// REQUEST PARSING (Retell)
+// =====================
+function extractArgs(req) {
+  return req.body?.args ?? req.body?.arguments ?? req.body ?? {};
 }
 
 // =====================
@@ -168,15 +240,20 @@ app.get("/", (req, res) => res.json({ ok: true }));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 // =====================
-// (1) GET NEXT SLOTS (no args)
+// RETELL: GET NEXT SLOTS (2 by default)
 // =====================
 app.post("/retell/get_slots", async (req, res) => {
   try {
+    const args = extractArgs(req);
+    const count = Number(args.count ?? 2);
+
     const { calendar } = getGoogleClients();
     const nowLocal = DateTime.now().setZone(DEFAULT_TIMEZONE);
 
     const candidates = buildCandidateSlots(nowLocal);
-    if (!candidates.length) return res.json({ status: "no_slots", slots: [] });
+    if (!candidates.length) {
+      return res.json({ status: "no_slots", slots: [] });
+    }
 
     const busy = await getBusyIntervals(
       calendar,
@@ -184,115 +261,108 @@ app.post("/retell/get_slots", async (req, res) => {
       candidates[candidates.length - 1].end.toUTC().toISO()
     );
 
-    const open = candidates.filter((s) => slotIsFree(s, busy)).slice(0, 2);
+    const free = pickFirstNFreeSlots(candidates, busy, count);
 
     return res.json({
-      status: open.length ? "ok" : "no_slots",
-      timezone: "ET",
-      slots: open.map(formatSlotForAgent)
+      status: free.length ? "ok" : "no_slots",
+      slots: free.map((s) => ({
+        start_time: s.start.toISO(),
+        end_time: s.end.toISO(),
+        label: formatSlotLabel(s.start, s.end)
+      }))
     });
   } catch (err) {
     console.error("GET_SLOTS ERROR:", err);
-    return res.status(500).json({ status: "error", message: err?.message || "Internal error" });
+    return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
   }
 });
 
 // =====================
-// (2) CONFIRM AVAILABILITY (start_time)
+// RETELL: CHECK AVAILABILITY FOR A REQUESTED SLOT
 // =====================
-app.post("/retell/confirm_availability", async (req, res) => {
+app.post("/retell/check_availability", async (req, res) => {
   try {
-    const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
-    const { start_time } = payload;
+    const args = extractArgs(req);
+    const start_time = args.start_time ?? args.preferred_datetime ?? args.preferred_time;
 
     if (!start_time) {
-      return res.status(400).json({ status: "error", message: "Missing start_time" });
-    }
-
-    const start = DateTime.fromISO(start_time, { setZone: true }).setZone(DEFAULT_TIMEZONE);
-    if (!start.isValid) {
-      return res.status(400).json({ status: "error", message: "Invalid start_time ISO" });
+      return res.status(400).json({
+        status: "error",
+        message: "Missing start_time (ISO 8601 in ET), e.g. 2026-02-11T14:00:00-05:00"
+      });
     }
 
     const duration = Number(DEMO_DURATION_MINUTES);
-    const slot = { start, end: start.plus({ minutes: duration }) };
+    const start = DateTime.fromISO(start_time, { setZone: true }).setZone(DEFAULT_TIMEZONE);
+    if (!start.isValid) {
+      return res.status(400).json({ status: "error", message: "Invalid start_time ISO format" });
+    }
+
+    const end = start.plus({ minutes: duration });
 
     const { calendar } = getGoogleClients();
+    const busy = await getBusyIntervals(calendar, start.toUTC().toISO(), end.toUTC().toISO());
 
-    const busy = await getBusyIntervals(
-      calendar,
-      slot.start.toUTC().toISO(),
-      slot.end.toUTC().toISO()
-    );
-
-    const available = slotIsFree(slot, busy);
+    const requested = { start, end };
+    const available = slotIsFree(requested, busy);
 
     return res.json({
       status: "ok",
       available,
-      timezone: "ET",
-      slot: formatSlotForAgent(slot)
+      start_time: start.toISO(),
+      end_time: end.toISO(),
+      label: formatSlotLabel(start, end)
     });
   } catch (err) {
-    console.error("CONFIRM_AVAILABILITY ERROR:", err);
-    return res.status(500).json({ status: "error", message: err?.message || "Internal error" });
+    console.error("CHECK_AVAILABILITY ERROR:", err);
+    return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
   }
 });
 
 // =====================
-// (3) GET SLOTS NEAR (start_time, count=2)
+// RETELL: GET 1–2 NEARBY SLOTS
 // =====================
-app.post("/retell/get_slots_near", async (req, res) => {
+app.post("/retell/get_nearby_slots", async (req, res) => {
   try {
-    const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
-    const { start_time, count = 2 } = payload;
+    const args = extractArgs(req);
+    const start_time = args.start_time ?? args.preferred_datetime ?? args.preferred_time;
+    const count = Number(args.count ?? 2);
 
     if (!start_time) {
-      return res.status(400).json({ status: "error", message: "Missing start_time" });
+      return res.status(400).json({
+        status: "error",
+        message: "Missing start_time (ISO 8601 in ET), e.g. 2026-02-11T14:00:00-05:00"
+      });
     }
 
     const preferred = DateTime.fromISO(start_time, { setZone: true }).setZone(DEFAULT_TIMEZONE);
     if (!preferred.isValid) {
-      return res.status(400).json({ status: "error", message: "Invalid start_time ISO" });
+      return res.status(400).json({ status: "error", message: "Invalid start_time ISO format" });
     }
 
     const { calendar } = getGoogleClients();
-    const nowLocal = DateTime.now().setZone(DEFAULT_TIMEZONE);
-
-    // Generate candidates, but with lead time respected from now
-    const candidates = buildCandidateSlots(nowLocal);
-    if (!candidates.length) return res.json({ status: "no_slots", slots: [] });
-
-    const busy = await getBusyIntervals(
-      calendar,
-      candidates[0].start.toUTC().toISO(),
-      candidates[candidates.length - 1].end.toUTC().toISO()
-    );
-
-    // Prefer slots closest to preferred time
-    const open = candidates
-      .filter((s) => slotIsFree(s, busy))
-      .map((s) => ({ ...s, diff: Math.abs(s.start.toMillis() - preferred.toMillis()) }))
-      .sort((a, b) => a.diff - b.diff)
-      .slice(0, Math.max(1, Number(count)));
+    const free = await findNearbyFreeSlots(calendar, preferred, count);
 
     return res.json({
-      status: open.length ? "ok" : "no_slots",
-      timezone: "ET",
-      slots: open.map(({ start, end }) => formatSlotForAgent({ start, end }))
+      status: free.length ? "ok" : "no_slots",
+      slots: free.map((s) => ({
+        start_time: s.start.toISO(),
+        end_time: s.end.toISO(),
+        label: formatSlotLabel(s.start, s.end)
+      }))
     });
   } catch (err) {
-    console.error("GET_SLOTS_NEAR ERROR:", err);
-    return res.status(500).json({ status: "error", message: err?.message || "Internal error" });
+    console.error("GET_NEARBY_SLOTS ERROR:", err);
+    return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
   }
 });
 
 // =====================
-// (4) BOOK DEMO (chosen start_time + confirmed info)
+// RETELL: BOOK DEMO (caller chooses start_time)
 // =====================
 app.post("/retell/book_demo", async (req, res) => {
   try {
-    const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
+    const payload = extractArgs(req);
 
     const {
       full_name,
@@ -307,6 +377,7 @@ app.post("/retell/book_demo", async (req, res) => {
     if (!full_name) missing.push("full_name");
     if (!email) missing.push("email");
     if (!phone) missing.push("phone");
+    if (!business_type) missing.push("business_type");
     if (!start_time) missing.push("start_time");
 
     if (missing.length) {
@@ -317,50 +388,59 @@ app.post("/retell/book_demo", async (req, res) => {
       });
     }
 
+    const duration = Number(DEMO_DURATION_MINUTES);
     const start = DateTime.fromISO(start_time, { setZone: true }).setZone(DEFAULT_TIMEZONE);
     if (!start.isValid) {
-      return res.status(400).json({ status: "error", message: "Invalid start_time ISO" });
+      return res.status(400).json({ status: "error", message: "Invalid start_time ISO format" });
     }
-
-    const duration = Number(DEMO_DURATION_MINUTES);
-    const slot = { start, end: start.plus({ minutes: duration }) };
+    const end = start.plus({ minutes: duration });
 
     const { calendar, sheets } = getGoogleClients();
 
-    // Re-check availability right before booking (race-condition safe)
-    const busy = await getBusyIntervals(
-      calendar,
-      slot.start.toUTC().toISO(),
-      slot.end.toUTC().toISO()
-    );
+    // Confirm requested slot is free right now
+    const busy = await getBusyIntervals(calendar, start.toUTC().toISO(), end.toUTC().toISO());
+    const requested = { start, end };
 
-    if (!slotIsFree(slot, busy)) {
+    if (!slotIsFree(requested, busy)) {
+      const alternatives = await findNearbyFreeSlots(calendar, start, 2);
       return res.json({
         status: "unavailable",
-        message: "That time was just taken.",
-        timezone: "ET"
+        message: "That time is taken.",
+        requested: {
+          start_time: start.toISO(),
+          end_time: end.toISO(),
+          label: formatSlotLabel(start, end)
+        },
+        alternatives: alternatives.map((s) => ({
+          start_time: s.start.toISO(),
+          end_time: s.end.toISO(),
+          label: formatSlotLabel(s.start, s.end)
+        }))
       });
     }
 
-    // Create event on the calendar (no attendees / no Meet to avoid SA restrictions)
+    // IMPORTANT:
+    // - No attendees (avoids "Service accounts cannot invite attendees..." error)
+    // - No conferenceData (avoids "Invalid conference type value" issues)
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
+      sendUpdates: "none",
       requestBody: {
         summary: `MK Receptions Demo – ${full_name}`,
         description:
           `Name: ${full_name}\n` +
           `Email: ${email}\n` +
           `Phone: ${phone}\n` +
-          `Business type: ${business_type}\n\n` +
-          `Notes:\n${notes}`,
-        start: { dateTime: slot.start.toISO(), timeZone: DEFAULT_TIMEZONE },
-        end: { dateTime: slot.end.toISO(), timeZone: DEFAULT_TIMEZONE }
+          `Business: ${business_type}\n` +
+          (notes ? `Notes: ${notes}\n` : ""),
+        start: { dateTime: start.toISO(), timeZone: DEFAULT_TIMEZONE },
+        end: { dateTime: end.toISO(), timeZone: DEFAULT_TIMEZONE }
       }
     });
 
     const calendarLink = event.data.htmlLink || "";
+    const eventId = event.data.id || "";
 
-    // Log to Sheets
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${SHEET_TAB}!A:Z`,
@@ -372,18 +452,18 @@ app.post("/retell/book_demo", async (req, res) => {
           email,
           phone,
           business_type,
-          slot.start.toISO(),
-          slot.end.toISO(),
-          calendarLink
+          start.toISO(),
+          end.toISO(),
+          calendarLink,
+          eventId
         ]]
       }
     });
 
     return res.json({
       status: "confirmed",
-      timezone: "ET",
-      start_time: slot.start.toISO(),
-      end_time: slot.end.toISO(),
+      start_time: start.toISO(),
+      end_time: end.toISO(),
       calendar_link: calendarLink
     });
   } catch (err) {
@@ -420,7 +500,9 @@ app.get("/twilio/voice", (req, res) => {
 });
 
 // =====================
-// START
+// START SERVER
 // =====================
 const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
+
 app.listen(port, () => console.log(`Server running on port ${port}`));
