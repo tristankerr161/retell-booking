@@ -1,6 +1,3 @@
-// =====================
-// FULL server.js (COPY/PASTE ENTIRE FILE)
-// =====================
 import express from "express";
 import { google } from "googleapis";
 import { DateTime, Interval } from "luxon";
@@ -175,17 +172,14 @@ function validateRequestedStart(startTimeISO) {
   const now = DateTime.now().setZone(DEFAULT_TIMEZONE);
   const lead = Number(MIN_LEAD_MINUTES);
 
-  // Blocks past or too-soon (also catches incorrect years like 2024)
   if (start < now.plus({ minutes: lead })) {
     return { ok: false, message: "That time is in the past or too soon. Please choose a future time." };
   }
 
-  // Weekdays only
   if (!isWeekday(start)) {
     return { ok: false, message: "Demos are Monday through Friday only." };
   }
 
-  // 12pm–9pm ET window
   const startHour = Number(WORK_START_HOUR);
   const endHour = Number(WORK_END_HOUR);
   const end = start.plus({ minutes: Number(DEMO_DURATION_MINUTES) });
@@ -197,7 +191,6 @@ function validateRequestedStart(startTimeISO) {
     return { ok: false, message: `Demos can only be booked between ${startHour}:00 and ${endHour}:00 ET.` };
   }
 
-  // Enforce 30-min boundaries
   const step = Number(SLOT_GRANULARITY_MINUTES);
   if (start.minute % step !== 0) {
     return { ok: false, message: `Please choose a time on a ${step}-minute boundary (e.g., 12:00, 12:30, 1:00).` };
@@ -379,14 +372,7 @@ app.post("/retell/book_demo", async (req, res) => {
   try {
     const payload = extractArgs(req);
 
-    const {
-      full_name,
-      email,
-      phone,
-      business_type,
-      notes = "",
-      start_time
-    } = payload;
+    const { full_name, email, phone, business_type, notes = "", start_time } = payload;
 
     const missing = [];
     if (!full_name) missing.push("full_name");
@@ -421,7 +407,6 @@ app.post("/retell/book_demo", async (req, res) => {
       });
     }
 
-    // Create event (NO attendees / NO Meet link)
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
       sendUpdates: "none",
@@ -460,12 +445,7 @@ app.post("/retell/book_demo", async (req, res) => {
       }
     });
 
-    return res.json({
-      status: "confirmed",
-      start_time: start.toISO(),
-      end_time: end.toISO(),
-      calendar_link: calendarLink
-    });
+    return res.json({ status: "confirmed", start_time: start.toISO(), end_time: end.toISO(), calendar_link: calendarLink });
   } catch (err) {
     console.error("BOOK_DEMO ERROR:", err);
     return res.status(500).json({ status: "error", message: err?.message || "Internal server error" });
@@ -500,5 +480,6 @@ app.get("/twilio/voice", (req, res) => {
 // START SERVER (ONLY ONE LISTEN)
 // =====================
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
-port}`));
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
