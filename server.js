@@ -6,7 +6,7 @@ const app = express();
 
 /**
  * Twilio sends application/x-www-form-urlencoded
- * Retell function calls send JSON
+ * Retell tool calls send JSON
  */
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "2mb" }));
@@ -15,13 +15,7 @@ app.use(express.json({ limit: "2mb" }));
 // ENV CONFIG
 // =====================
 const {
-  // NEW (recommended)
-  GOOGLE_CLIENT_EMAIL,
-  GOOGLE_PRIVATE_KEY,
-
-  // OLD (optional fallback)
   GOOGLE_SERVICE_ACCOUNT_JSON,
-
   GCAL_ID = "primary",
   SHEET_ID,
   SHEET_TAB = "Bookings",
@@ -35,57 +29,26 @@ const {
   RETELL_AGENT_ID
 } = process.env;
 
+if (!GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
 if (!SHEET_ID) throw new Error("Missing SHEET_ID");
 if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 
 // =====================
-// GOOGLE CLIENTS
+// GOOGLE CLIENTS (SINGLE SOURCE OF TRUTH)
 // =====================
-function normalizePrivateKey(raw) {
-  if (!raw) return "";
-
-  // If you paste as one line with \n sequences, convert them to real newlines.
-  let k = raw.replace(/\\n/g, "\n");
-
-  // Normalize Windows line endings
-  k = k.replace(/\r\n/g, "\n").trim();
-
-  return k;
-}
-
-function getGoogleCreds() {
-  // Prefer GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY
-  if (GOOGLE_CLIENT_EMAIL && GOOGLE_PRIVATE_KEY) {
-    return {
-      client_email: GOOGLE_CLIENT_EMAIL.trim(),
-      private_key: normalizePrivateKey(GOOGLE_PRIVATE_KEY)
-    };
-  }
-
-  // Fallback to GOOGLE_SERVICE_ACCOUNT_JSON if present
-  if (GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const parsed = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
-    return {
-      client_email: (parsed.client_email || "").trim(),
-      private_key: normalizePrivateKey(parsed.private_key || "")
-    };
-  }
-
-  throw new Error(
-    "Missing Google credentials. Provide GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY (recommended) OR GOOGLE_SERVICE_ACCOUNT_JSON."
-  );
-}
-
 function getGoogleClients() {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
+  const key = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
 
-  const key = JSON.parse(raw);
+  const privateKey = key.private_key.replace(/\\n/g, "\n");
+
+  if (!privateKey.includes("BEGIN PRIVATE KEY")) {
+    throw new Error("Invalid Google private key format");
+  }
 
   const auth = new google.auth.JWT(
     key.client_email,
     undefined,
-    key.private_key.replace(/\\n/g, "\n"),
+    privateKey,
     [
       "https://www.googleapis.com/auth/calendar",
       "https://www.googleapis.com/auth/spreadsheets"
@@ -125,7 +88,10 @@ function buildCandidateSlots(nowLocal) {
 
     while (cursor.plus({ minutes: duration }) <= end) {
       if (cursor >= earliest) {
-        slots.push({ start: cursor, end: cursor.plus({ minutes: duration }) });
+        slots.push({
+          start: cursor,
+          end: cursor.plus({ minutes: duration })
+        });
       }
       cursor = cursor.plus({ minutes: step });
     }
@@ -140,7 +106,7 @@ function slotIsFree(slot, busyIntervals) {
 }
 
 // =====================
-// HEALTH CHECKS
+// HEALTH CHECK
 // =====================
 app.get("/", (req, res) => res.json({ ok: true }));
 app.get("/health", (req, res) => res.json({ ok: true }));
@@ -150,7 +116,6 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // =====================
 app.post("/retell/book_demo", async (req, res) => {
   try {
-    // Retell may send args-only OR wrapped in args/arguments
     const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
 
     const {
@@ -165,6 +130,7 @@ app.post("/retell/book_demo", async (req, res) => {
     if (!full_name) missing.push("full_name");
     if (!email) missing.push("email");
     if (!phone) missing.push("phone");
+
     if (missing.length) {
       return res.status(400).json({
         status: "error",
@@ -188,7 +154,10 @@ app.post("/retell/book_demo", async (req, res) => {
     });
 
     const busy = (fb.data.calendars?.[GCAL_ID]?.busy || []).map(b =>
-      Interval.fromDateTimes(DateTime.fromISO(b.start), DateTime.fromISO(b.end))
+      Interval.fromDateTimes(
+        DateTime.fromISO(b.start),
+        DateTime.fromISO(b.end)
+      )
     );
 
     const slot = candidates.find(s => slotIsFree(s, busy));
@@ -245,11 +214,12 @@ app.post("/retell/book_demo", async (req, res) => {
       end_time: slot.end.toISO(),
       meeting_link: meetLink
     });
+
   } catch (err) {
     console.error("BOOK DEMO ERROR:", err);
     return res.status(500).json({
       status: "error",
-      message: err?.message || "Internal server error"
+      message: err.message || "Internal server error"
     });
   }
 });
@@ -257,7 +227,7 @@ app.post("/retell/book_demo", async (req, res) => {
 // =====================
 // TWILIO → RETELL STREAM
 // =====================
-function twimlStreamResponse(agentId) {
+function twiml(agentId) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
@@ -270,16 +240,18 @@ function twimlStreamResponse(agentId) {
 
 app.post("/twilio/voice", (req, res) => {
   res.type("text/xml");
-  res.send(twimlStreamResponse(RETELL_AGENT_ID));
+  res.send(twiml(RETELL_AGENT_ID));
 });
 
 app.get("/twilio/voice", (req, res) => {
   res.type("text/xml");
-  res.send(twimlStreamResponse(RETELL_AGENT_ID));
+  res.send(twiml(RETELL_AGENT_ID));
 });
 
 // =====================
 // START SERVER
 // =====================
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
