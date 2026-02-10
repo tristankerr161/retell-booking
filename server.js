@@ -34,21 +34,15 @@ if (!SHEET_ID) throw new Error("Missing SHEET_ID");
 if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 
 // =====================
-// GOOGLE CLIENTS (FINAL)
+// GOOGLE CLIENT
 // =====================
 function getGoogleClients() {
   const key = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
 
-  const privateKey = key.private_key.replace(/\\n/g, "\n");
-
-  if (!privateKey.includes("BEGIN PRIVATE KEY")) {
-    throw new Error("Invalid Google private key format");
-  }
-
   const auth = new google.auth.JWT(
     key.client_email,
     undefined,
-    privateKey,
+    key.private_key.replace(/\\n/g, "\n"),
     [
       "https://www.googleapis.com/auth/calendar",
       "https://www.googleapis.com/auth/spreadsheets"
@@ -106,10 +100,10 @@ function slotIsFree(slot, busyIntervals) {
 }
 
 // =====================
-// HEALTH CHECK
+// HEALTH
 // =====================
-app.get("/", (req, res) => res.json({ ok: true }));
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/", (_, res) => res.json({ ok: true }));
+app.get("/health", (_, res) => res.json({ ok: true }));
 
 // =====================
 // RETELL → BOOK DEMO
@@ -118,24 +112,12 @@ app.post("/retell/book_demo", async (req, res) => {
   try {
     const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
 
-    const {
-      full_name,
-      email,
-      phone,
-      business_type = "",
-      notes = ""
-    } = payload;
+    const { full_name, email, phone, business_type = "", notes = "" } = payload;
 
-    const missing = [];
-    if (!full_name) missing.push("full_name");
-    if (!email) missing.push("email");
-    if (!phone) missing.push("phone");
-
-    if (missing.length) {
+    if (!full_name || !email || !phone) {
       return res.status(400).json({
         status: "error",
-        message: "Missing required fields",
-        missing
+        message: "Missing required fields"
       });
     }
 
@@ -154,40 +136,23 @@ app.post("/retell/book_demo", async (req, res) => {
     });
 
     const busy = (fb.data.calendars?.[GCAL_ID]?.busy || []).map(b =>
-      Interval.fromDateTimes(
-        DateTime.fromISO(b.start),
-        DateTime.fromISO(b.end)
-      )
+      Interval.fromDateTimes(DateTime.fromISO(b.start), DateTime.fromISO(b.end))
     );
 
     const slot = candidates.find(s => slotIsFree(s, busy));
     if (!slot) return res.json({ status: "no_slots" });
 
+    // ✅ NO conferenceData (this fixes your error)
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
-      conferenceDataVersion: 1,
       requestBody: {
         summary: `MK Receptions Demo – ${full_name}`,
         description:
-          `Email: ${email}\n` +
-          `Phone: ${phone}\n` +
-          `Business: ${business_type}\n` +
-          `${notes}`,
+          `Email: ${email}\nPhone: ${phone}\nBusiness: ${business_type}\n${notes}`,
         start: { dateTime: slot.start.toISO(), timeZone: DEFAULT_TIMEZONE },
-        end: { dateTime: slot.end.toISO(), timeZone: DEFAULT_TIMEZONE },
-        conferenceData: {
-          createRequest: {
-            requestId: `meet-${Date.now()}`,
-            conferenceSolutionKey: { type: "hangoutsMeet" }
-          }
-        }
+        end: { dateTime: slot.end.toISO(), timeZone: DEFAULT_TIMEZONE }
       }
     });
-
-    const meetLink =
-      event.data.conferenceData?.entryPoints?.find(
-        e => e.entryPointType === "video"
-      )?.uri || event.data.hangoutLink || "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
@@ -202,7 +167,7 @@ app.post("/retell/book_demo", async (req, res) => {
           business_type,
           slot.start.toISO(),
           slot.end.toISO(),
-          meetLink
+          event.data.htmlLink
         ]]
       }
     });
@@ -211,20 +176,20 @@ app.post("/retell/book_demo", async (req, res) => {
       status: "confirmed",
       start_time: slot.start.toISO(),
       end_time: slot.end.toISO(),
-      meeting_link: meetLink
+      calendar_link: event.data.htmlLink
     });
 
   } catch (err) {
-    console.error("BOOK DEMO ERROR:", err);
+    console.error(err);
     return res.status(500).json({
       status: "error",
-      message: err.message || "Internal server error"
+      message: err.message
     });
   }
 });
 
 // =====================
-// TWILIO → RETELL STREAM
+// TWILIO → RETELL
 // =====================
 function twiml(agentId) {
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -248,9 +213,5 @@ app.get("/twilio/voice", (req, res) => {
 });
 
 // =====================
-// START SERVER
-// =====================
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
