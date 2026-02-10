@@ -5,11 +5,11 @@ import { DateTime, Interval } from "luxon";
 const app = express();
 
 /**
- * IMPORTANT:
  * Twilio sends application/x-www-form-urlencoded
+ * Retell function calls send JSON (usually)
  */
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
 // =====================
 // ENV CONFIG
@@ -25,15 +25,13 @@ const {
   SLOT_GRANULARITY_MINUTES = "30",
   SEARCH_DAYS = "14",
   WORK_START_HOUR = "9",
-  WORK_END_HOUR = "17"
+  WORK_END_HOUR = "17",
+  RETELL_AGENT_ID
 } = process.env;
 
-if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
-  throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
-}
-if (!SHEET_ID) {
-  throw new Error("Missing SHEET_ID");
-}
+if (!GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
+if (!SHEET_ID) throw new Error("Missing SHEET_ID");
+if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 
 // =====================
 // GOOGLE CLIENTS
@@ -84,10 +82,7 @@ function buildCandidateSlots(nowLocal) {
 
     while (cursor.plus({ minutes: duration }) <= end) {
       if (cursor >= earliest) {
-        slots.push({
-          start: cursor,
-          end: cursor.plus({ minutes: duration })
-        });
+        slots.push({ start: cursor, end: cursor.plus({ minutes: duration }) });
       }
       cursor = cursor.plus({ minutes: step });
     }
@@ -102,22 +97,43 @@ function slotIsFree(slot, busyIntervals) {
 }
 
 // =====================
+// HEALTH CHECK
+// =====================
+app.get("/", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// =====================
 // RETELL → BOOK DEMO
 // =====================
 app.post("/retell/book_demo", async (req, res) => {
   try {
+    // ✅ Support BOTH payload styles:
+    // - args-only: { full_name, email, phone, ... }
+    // - wrapped:   { args: { full_name, email, phone, ... }, ... }
+    const payload = req.body?.args ?? req.body?.arguments ?? req.body ?? {};
+
+    // Helpful log for debugging
+    console.log("BOOK_DEMO raw body:", JSON.stringify(req.body));
+    console.log("BOOK_DEMO payload:", JSON.stringify(payload));
+
     const {
       full_name,
       email,
       phone,
       business_type = "",
       notes = ""
-    } = req.body;
+    } = payload;
 
-    if (!full_name || !email || !phone) {
+    const missing = [];
+    if (!full_name) missing.push("full_name");
+    if (!email) missing.push("email");
+    if (!phone) missing.push("phone");
+
+    if (missing.length) {
       return res.status(400).json({
         status: "error",
-        message: "Missing required fields"
+        message: "Missing required fields",
+        missing
       });
     }
 
@@ -125,9 +141,7 @@ app.post("/retell/book_demo", async (req, res) => {
     const nowLocal = DateTime.now().setZone(DEFAULT_TIMEZONE);
 
     const candidates = buildCandidateSlots(nowLocal);
-    if (!candidates.length) {
-      return res.json({ status: "no_slots" });
-    }
+    if (!candidates.length) return res.json({ status: "no_slots" });
 
     const fb = await calendar.freebusy.query({
       requestBody: {
@@ -137,17 +151,12 @@ app.post("/retell/book_demo", async (req, res) => {
       }
     });
 
-    const busy = (fb.data.calendars[GCAL_ID]?.busy || []).map(b =>
-      Interval.fromDateTimes(
-        DateTime.fromISO(b.start),
-        DateTime.fromISO(b.end)
-      )
+    const busy = (fb.data.calendars?.[GCAL_ID]?.busy || []).map(b =>
+      Interval.fromDateTimes(DateTime.fromISO(b.start), DateTime.fromISO(b.end))
     );
 
     const slot = candidates.find(s => slotIsFree(s, busy));
-    if (!slot) {
-      return res.json({ status: "no_slots" });
-    }
+    if (!slot) return res.json({ status: "no_slots" });
 
     const event = await calendar.events.insert({
       calendarId: GCAL_ID,
@@ -159,14 +168,8 @@ app.post("/retell/book_demo", async (req, res) => {
           `Phone: ${phone}\n` +
           `Business: ${business_type}\n` +
           `${notes}`,
-        start: {
-          dateTime: slot.start.toISO(),
-          timeZone: DEFAULT_TIMEZONE
-        },
-        end: {
-          dateTime: slot.end.toISO(),
-          timeZone: DEFAULT_TIMEZONE
-        },
+        start: { dateTime: slot.start.toISO(), timeZone: DEFAULT_TIMEZONE },
+        end: { dateTime: slot.end.toISO(), timeZone: DEFAULT_TIMEZONE },
         attendees: [{ email }],
         conferenceData: {
           createRequest: {
@@ -178,9 +181,9 @@ app.post("/retell/book_demo", async (req, res) => {
     });
 
     const meetLink =
-      event.data.conferenceData?.entryPoints?.find(
-        e => e.entryPointType === "video"
-      )?.uri || event.data.hangoutLink;
+      event.data.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri ||
+      event.data.hangoutLink ||
+      "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
@@ -211,7 +214,7 @@ app.post("/retell/book_demo", async (req, res) => {
     console.error("BOOK DEMO ERROR:", err);
     return res.status(500).json({
       status: "error",
-      message: "Internal server error"
+      message: err?.message || "Internal server error"
     });
   }
 });
@@ -219,26 +222,30 @@ app.post("/retell/book_demo", async (req, res) => {
 // =====================
 // TWILIO → RETELL STREAM
 // =====================
-// ====== TWILIO VOICE WEBHOOK ======
-app.post("/twilio/voice", (req, res) => {
-  res.type("text/xml");
-
-  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+function twimlStreamResponse(agentId) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream 
-      url="wss://api.retellai.com/audio-stream"
-    >
-      <Parameter name="agent_id" value="${process.env.RETELL_AGENT_ID}" />
+    <Stream url="wss://api.retellai.com/audio-stream">
+      <Parameter name="agent_id" value="${agentId}" />
     </Stream>
   </Connect>
-</Response>`);
+</Response>`;
+}
+
+app.post("/twilio/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(twimlStreamResponse(RETELL_AGENT_ID));
+});
+
+// Nice-to-have: lets you visit in browser without "Cannot GET"
+app.get("/twilio/voice", (req, res) => {
+  res.type("text/xml");
+  res.send(twimlStreamResponse(RETELL_AGENT_ID));
 });
 
 // =====================
 // START SERVER
 // =====================
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log("Server running on port " + port);
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
