@@ -34,7 +34,7 @@ if (!SHEET_ID) throw new Error("Missing SHEET_ID");
 if (!RETELL_AGENT_ID) throw new Error("Missing RETELL_AGENT_ID");
 
 // =====================
-// GOOGLE CLIENTS (SINGLE SOURCE OF TRUTH)
+// GOOGLE CLIENTS (FINAL)
 // =====================
 function getGoogleClients() {
   const key = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -175,7 +175,6 @@ app.post("/retell/book_demo", async (req, res) => {
           `${notes}`,
         start: { dateTime: slot.start.toISO(), timeZone: DEFAULT_TIMEZONE },
         end: { dateTime: slot.end.toISO(), timeZone: DEFAULT_TIMEZONE },
-        attendees: [{ email }],
         conferenceData: {
           createRequest: {
             requestId: `meet-${Date.now()}`,
@@ -186,9 +185,9 @@ app.post("/retell/book_demo", async (req, res) => {
     });
 
     const meetLink =
-      event.data.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri ||
-      event.data.hangoutLink ||
-      "";
+      event.data.conferenceData?.entryPoints?.find(
+        e => e.entryPointType === "video"
+      )?.uri || event.data.hangoutLink || "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
